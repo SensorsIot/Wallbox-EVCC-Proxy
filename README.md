@@ -1,10 +1,10 @@
-# Wallbox EVCC Proxy
+# ⚡ Wallbox EVCC Proxy
 
 A WebSocket proxy service that fixes communication issues between electric vehicle wallbox chargers and EVCC (Electric Vehicle Charge Controller) systems.
 
-## Quick Start
+## 🚀 Quick Start
 
-### Installation
+### 📦 Installation
 
 1. Clone the repository:
    ```bash
@@ -46,7 +46,7 @@ A WebSocket proxy service that fixes communication issues between electric vehic
    sudo systemctl start ocpp-proxy.service
    ```
 
-### Usage
+### 🎯 Usage
 
 **Manual run:**
 ```bash
@@ -69,7 +69,7 @@ sudo journalctl -u ocpp-proxy.service -f
 tail -f /home/OCPP-Proxy/ocpp_messages.log
 ```
 
-## What It Does
+## ✨ What It Does
 
 - **Fixes malformed URLs**: Converts `ws://host:port//path` → `ws://host:port/path`
 - **Handles OCPP protocol**: Manages OCPP 1.6 subprotocol negotiation
@@ -77,7 +77,7 @@ tail -f /home/OCPP-Proxy/ocpp_messages.log
 - **Comprehensive logging**: Console and file logging for monitoring
 - **Automatic restart**: Runs as systemd service with auto-restart
 
-## Network Setup
+## 🌐 Network Setup
 
 ```
 [Wallbox] ←→ [Proxy:8888] ←→ [EVCC:8887]
@@ -87,17 +87,17 @@ tail -f /home/OCPP-Proxy/ocpp_messages.log
 - **Proxy**: Runs on port 8888, forwards to EVCC
 - **EVCC**: Receives cleaned connections on port 8887
 
-## Documentation
+## 📚 Documentation
 
 - **[Functional Specification](Wallbox-EVCC-Proxy-FSD.md)**: Complete technical specification
 - **Configuration**: See command-line options with `./ocpp_proxy.py --help`
 
-## Requirements
+## 📋 Requirements
 
 - Python 3.7+
 - `websockets` library
 - Linux with systemd (for service mode)
 
-## License
+## 📄 License
 
 Open source project for the EV charging community.
