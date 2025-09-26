@@ -69,7 +69,8 @@ sudo journalctl -u ocpp-proxy.service -f
 tail -f /home/OCPP-Proxy/ocpp_messages.log
 
 # OCPP message logs (formatted for humans)
-./format_logs.py ocpp_messages.log
+./format_logs.py ocpp_messages.log                 # Detailed format with colors
+./format_logs_compare.py ocpp_messages.log         # Side-by-side comparison format
 ./format_logs.py ocpp_messages.log --no-payload    # Hide payloads
 ./format_logs.py ocpp_messages.log --show-raw      # Show raw JSON
 ```
