@@ -65,8 +65,8 @@ Client          Proxy Server         Target Server
 **Description**: Process and fix OCPP protocol messages
 
 **Timestamp Fixing**:
-- Detect invalid timestamp formats (e.g., `2024-09-23T21:21:18.000Z`)
-- Convert to valid ISO format (e.g., `2024-09-23T21:21:18.000Z`)
+- Detect invalid null timestamps (e.g., `0000-00-00T00:00:00.000Z`)
+- Convert to valid current timestamp (e.g., `2024-09-26T14:30:28.121Z`)
 - Log timestamp corrections
 
 **Message Types Supported**:
