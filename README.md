@@ -65,8 +65,13 @@ sudo systemctl stop ocpp-proxy.service      # Stop
 # Service logs
 sudo journalctl -u ocpp-proxy.service -f
 
-# OCPP message logs
+# OCPP message logs (raw)
 tail -f /home/OCPP-Proxy/ocpp_messages.log
+
+# OCPP message logs (formatted for humans)
+./format_logs.py ocpp_messages.log
+./format_logs.py ocpp_messages.log --no-payload    # Hide payloads
+./format_logs.py ocpp_messages.log --show-raw      # Show raw JSON
 ```
 
 ## ✨ What It Does
