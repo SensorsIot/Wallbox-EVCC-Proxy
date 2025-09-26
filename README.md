@@ -17,9 +17,30 @@ A WebSocket proxy service that fixes communication issues between electric vehic
    chmod +x ocpp_proxy.py
    ```
 
-3. Install as systemd service:
+3. Create systemd service file:
    ```bash
-   sudo cp ocpp_proxy.py /home/OCPP-Proxy/
+   sudo tee /etc/systemd/system/ocpp-proxy.service > /dev/null << 'EOF'
+   [Unit]
+   Description=OCPP WebSocket Proxy
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=root
+   WorkingDirectory=/home/OCPP-Proxy
+   ExecStart=/home/OCPP-Proxy/ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887
+   Restart=always
+   RestartSec=5
+   StandardOutput=journal
+   StandardError=journal
+
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   ```
+
+4. Enable and start the service:
+   ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable ocpp-proxy.service
    sudo systemctl start ocpp-proxy.service
