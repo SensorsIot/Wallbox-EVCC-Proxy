@@ -2,6 +2,32 @@
 
 A WebSocket proxy service that fixes communication issues between electric vehicle wallbox chargers and EVCC (Electric Vehicle Charge Controller) systems.
 
+## ✨ What It Does
+
+- **Fixes malformed URLs**: Converts `ws://host:port//path` → `ws://host:port/path`
+- **Handles OCPP protocol**: Manages OCPP 1.6 subprotocol negotiation
+- **Fixes timestamps**: Corrects invalid timestamp formats in OCPP messages
+- **Auto-configuration**: Automatically configures wallbox on BootNotification
+  - LocalPreAuthorize = true
+  - LocalAuthorizeOffline = false
+  - LocalAuthListEnabled = false
+  - AuthorizeRemoteTxRequests = false (enables RFID authorization)
+- **Web monitoring interface**: Real-time OCPP message viewer (port 8889)
+- **Comprehensive logging**: Console and file logging for monitoring
+- **Automatic restart**: Runs as systemd service with auto-restart
+
+![Live Status Dashboard](images/status-dashboard.png)
+
+## 🌐 Network Setup
+
+```
+[Wallbox] ←→ [Proxy:8888] ←→ [EVCC:8887]
+```
+
+- **Wallbox**: Connect to proxy at `ws://proxy-host:8888/path`
+- **Proxy**: Runs on port 8888, forwards to EVCC
+- **EVCC**: Receives cleaned connections on port 8887
+
 ## 🚀 Quick Start
 
 ### 📦 Installation
@@ -106,30 +132,6 @@ tail -f /home/OCPP-Proxy/ocpp_messages.log
 ./format_logs.py ocpp_messages.log --no-payload    # Hide payloads
 ./format_logs.py ocpp_messages.log --show-raw      # Show raw JSON
 ```
-
-## ✨ What It Does
-
-- **Fixes malformed URLs**: Converts `ws://host:port//path` → `ws://host:port/path`
-- **Handles OCPP protocol**: Manages OCPP 1.6 subprotocol negotiation
-- **Fixes timestamps**: Corrects invalid timestamp formats in OCPP messages
-- **Auto-configuration**: Automatically configures wallbox on BootNotification
-  - LocalPreAuthorize = true
-  - LocalAuthorizeOffline = false
-  - LocalAuthListEnabled = false
-  - AuthorizeRemoteTxRequests = false (enables RFID authorization)
-- **Web monitoring interface**: Real-time OCPP message viewer (port 8889)
-- **Comprehensive logging**: Console and file logging for monitoring
-- **Automatic restart**: Runs as systemd service with auto-restart
-
-## 🌐 Network Setup
-
-```
-[Wallbox] ←→ [Proxy:8888] ←→ [EVCC:8887]
-```
-
-- **Wallbox**: Connect to proxy at `ws://proxy-host:8888/path`
-- **Proxy**: Runs on port 8888, forwards to EVCC
-- **EVCC**: Receives cleaned connections on port 8887
 
 ## 📚 Documentation
 
