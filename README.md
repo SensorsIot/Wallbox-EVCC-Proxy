@@ -83,6 +83,8 @@ The proxy includes a built-in web interface with two pages:
   - Auto-updates every second when messages are processed
   - Transaction ID tracking
 
+![Live Status Dashboard](images/status-dashboard.png)
+
 **Service management:**
 ```bash
 sudo systemctl status ocpp-proxy.service    # Check status
