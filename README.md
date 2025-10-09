@@ -1,5 +1,11 @@
 # ⚡ OCPP 1.6J Wallbox EVCC Proxy
 
+[![Python](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Open%20Source-green.svg)](LICENSE)
+[![OCPP](https://img.shields.io/badge/OCPP-1.6J-orange.svg)](https://www.openchargealliance.org/)
+[![WebSocket](https://img.shields.io/badge/WebSocket-Proxy-purple.svg)](https://github.com/SensorsIot/Wallbox-EVCC-Proxy)
+[![Systemd](https://img.shields.io/badge/systemd-service-red.svg)](https://systemd.io/)
+
 A WebSocket proxy service that fixes communication issues between electric vehicle wallbox chargers and EVCC (Electric Vehicle Charge Controller) systems.
 This is a great debugging tool for understanding and fixing wallbox issues. All changes to he protocol are just examples I used for my project. You can easily extend whatever your wallbox needs to work. You can easily experiment by issuing commands or settings to the wallbox.
 
