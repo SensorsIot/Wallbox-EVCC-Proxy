@@ -1,6 +1,9 @@
-# ⚡ Wallbox EVCC Proxy
+# ⚡ OCPP 1.6J Wallbox EVCC Proxy
 
 A WebSocket proxy service that fixes communication issues between electric vehicle wallbox chargers and EVCC (Electric Vehicle Charge Controller) systems.
+This is a great debugging tool for understanding and fixing wallbox issues. All changes to he protocol are just examples I used for my project. You can easily extend whatever your wallbox needs to work. You can easily experiment by issuing commands or settings to the wallbox.
+
+Even easier is if you use, as I did, Claude CLI. It can start and stop the proxy and read all logs. Like that, you can talk to it like an expert and ask questions about the logs. It willingly implements all needed changes in no time.
 
 ## ✨ What It Does
 
@@ -49,7 +52,7 @@ A WebSocket proxy service that fixes communication issues between electric vehic
    [Unit]
    Description=OCPP WebSocket Proxy
    After=network.target
-
+   
    [Service]
    Type=simple
    User=root
@@ -59,7 +62,7 @@ A WebSocket proxy service that fixes communication issues between electric vehic
    RestartSec=5
    StandardOutput=journal
    StandardError=journal
-
+   
    [Install]
    WantedBy=multi-user.target
    EOF
