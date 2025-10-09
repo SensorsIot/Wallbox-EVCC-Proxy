@@ -69,10 +69,53 @@ Client          Proxy Server         Target Server
 - Convert to valid current timestamp (e.g., `2024-09-26T14:30:28.121Z`)
 - Log timestamp corrections
 
+**IdTag Length Fixing**:
+- Detect IdTag fields exceeding OCPP 20-character limit
+- Truncate or convert to shorter format
+- Maintain uniqueness where possible
+
+**Power Value Correction**:
+- Multiply watt values in MeterValues by 10 (corrects wallbox reporting error)
+- Apply to Power.Active.Import measurands only
+
+**Ampere to Watt Conversion**:
+- Convert SetChargingProfile commands from Amperes to Watts
+- Conversion factor: 690 W/A (based on empirical wallbox behavior)
+- Change chargingRateUnit from 'A' to 'W'
+
+**SetChargingProfile Standardization**:
+- Rewrite SetChargingProfile messages into wallbox-compatible format
+- Preserve limit value while standardizing structure
+- Use fixed parameters (chargingProfileId: 231, stackLevel: 0, numberPhases: 3)
+
+**Configuration Command Filtering**:
+- Block non-B.7 ChangeConfiguration commands
+- Allow only OCPP B.7 configuration keys (LocalPreAuthorize, AuthorizeRemoteTxRequests, etc.)
+- Prevents unauthorized configuration changes
+
 **Message Types Supported**:
 - All OCPP 1.6 message types
 - JSON-based message format
 - Call, CallResult, and CallError message patterns
+
+### 3.3a Auto-Configuration (FR-003a)
+
+**Description**: Automatically configure wallbox after BootNotification
+
+**Trigger**: BootNotification message from wallbox
+
+**Configuration Sequence**:
+1. Wait 5 seconds after BootNotification (allows EVCC to process first)
+2. Send ChangeConfiguration commands to wallbox:
+   - LocalPreAuthorize = true
+   - LocalAuthorizeOffline = false
+   - LocalAuthListEnabled = false
+   - AuthorizeRemoteTxRequests = false (enables RFID authorization)
+
+**Purpose**:
+- Ensures wallbox is properly configured for RFID operation
+- Prevents conflicts with EVCC's own configuration commands
+- Eliminates need for manual configuration
 
 ### 3.4 Logging System (FR-004)
 

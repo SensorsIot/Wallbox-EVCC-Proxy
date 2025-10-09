@@ -50,8 +50,38 @@ A WebSocket proxy service that fixes communication issues between electric vehic
 
 **Manual run:**
 ```bash
-./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887
+./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887 --web-port 8889
 ```
+
+**Web Interface:**
+The proxy includes a built-in web interface with two pages:
+
+**📝 Messages Page** (`http://192.168.0.150:8889/`)
+  - Real-time OCPP message display
+  - Color-coded message directions (Wallbox ↔ EVCC)
+  - Message type indicators (CALL, RESULT, ERROR)
+  - Tag highlights for converted/blocked messages
+  - Auto-refresh every 2 seconds
+  - Click messages to expand/collapse JSON payloads
+  - Clear message buffer button
+  - Keeps last 500 messages in memory
+
+**📊 Live Status Dashboard** (`http://192.168.0.150:8889/status`)
+  - Real-time electrical measurements from wallbox:
+    - Voltage per phase (L1, L2, L3)
+    - Current per phase (L1, L2, L3)
+    - Power per phase + total power
+    - Energy consumption
+  - EVCC charging commands:
+    - Current charging limit (Watts)
+    - Last command sent
+  - Charging statistics:
+    - Efficiency (actual vs requested power)
+    - Average voltage and current
+    - Power factor estimate
+  - Live indicators for charging status
+  - Auto-updates every second when messages are processed
+  - Transaction ID tracking
 
 **Service management:**
 ```bash
@@ -80,6 +110,12 @@ tail -f /home/OCPP-Proxy/ocpp_messages.log
 - **Fixes malformed URLs**: Converts `ws://host:port//path` → `ws://host:port/path`
 - **Handles OCPP protocol**: Manages OCPP 1.6 subprotocol negotiation
 - **Fixes timestamps**: Corrects invalid timestamp formats in OCPP messages
+- **Auto-configuration**: Automatically configures wallbox on BootNotification
+  - LocalPreAuthorize = true
+  - LocalAuthorizeOffline = false
+  - LocalAuthListEnabled = false
+  - AuthorizeRemoteTxRequests = false (enables RFID authorization)
+- **Web monitoring interface**: Real-time OCPP message viewer (port 8889)
 - **Comprehensive logging**: Console and file logging for monitoring
 - **Automatic restart**: Runs as systemd service with auto-restart
 
