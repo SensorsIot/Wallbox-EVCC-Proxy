@@ -1,7 +1,7 @@
 # ⚡ OCPP 1.6J Wallbox EVCC Proxy
 
 [![Python](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Open%20Source-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![OCPP](https://img.shields.io/badge/OCPP-1.6J-orange.svg)](https://www.openchargealliance.org/)
 [![WebSocket](https://img.shields.io/badge/WebSocket-Proxy-purple.svg)](https://github.com/SensorsIot/Wallbox-EVCC-Proxy)
 [![Systemd](https://img.shields.io/badge/systemd-service-red.svg)](https://systemd.io/)
@@ -155,4 +155,6 @@ tail -f /home/OCPP-Proxy/ocpp_messages.log
 
 ## 📄 License
 
-Open source project for the EV charging community.
+MIT License - Open source project for the EV charging community.
+
+See [LICENSE](LICENSE) file for details.
