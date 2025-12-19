@@ -93,6 +93,44 @@ Client          Proxy Server         Target Server
 - Allow only OCPP B.7 configuration keys (LocalPreAuthorize, AuthorizeRemoteTxRequests, etc.)
 - Prevents unauthorized configuration changes
 
+**Auto-Response for Unsupported Commands**:
+The Actec wallbox does not support several optional OCPP commands that EVCC uses during initialization. The proxy intercepts these commands and responds on behalf of the wallbox to prevent EVCC initialization failures:
+
+- **ChangeAvailability**: EVCC queries wallbox availability status
+  - Wallbox behavior: Does not respond (command not supported)
+  - Proxy action: Intercepts and responds with `{"status": "Accepted"}`
+  - Result: EVCC proceeds without 30-second timeout
+
+- **GetConfiguration**: EVCC requests wallbox configuration parameters
+  - Wallbox behavior: Does not respond (command not supported)
+  - Proxy action: Intercepts and responds with OCPP B.7 configuration keys:
+    - HeartbeatInterval: 60
+    - LocalPreAuthorize: true
+    - LocalAuthorizeOffline: false
+    - LocalAuthListEnabled: false
+    - AuthorizeRemoteTxRequests: false
+  - Result: EVCC receives expected configuration data
+
+- **TriggerMessage(BootNotification)**: EVCC requests wallbox to re-send BootNotification
+  - Wallbox behavior: Does not respond (command not supported)
+  - Proxy action: Intercepts and performs two operations:
+    1. Responds to TriggerMessage with `{"status": "Accepted"}`
+    2. Sends synthetic BootNotification to EVCC with wallbox details:
+       - chargePointModel: "EV-AC22K"
+       - chargePointVendor: "AcTEC"
+       - chargePointSerialNumber: "Actec"
+       - firmwareVersion: "V1.17.9"
+  - Result: EVCC receives required BootNotification without timeout
+
+**Impact**: Without these auto-responses, EVCC initialization would fail with:
+```
+[Actec-1] DEBUG failed configuring availability: timeout
+[main  ] FATAL cannot create charger 'actec_wallbox': cannot create charger type 'ocpp': timeout
+[main  ] FATAL will attempt restart in: 15m0s
+```
+
+With auto-responses enabled, EVCC initializes successfully in ~3 seconds without errors.
+
 **Message Types Supported**:
 - All OCPP 1.6 message types
 - JSON-based message format
@@ -291,6 +329,7 @@ Options:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1 | 2024-12-19 | Added auto-response for unsupported OCPP commands (ChangeAvailability, GetConfiguration, TriggerMessage) to fix EVCC initialization failures |
 | 1.0 | 2024-09-26 | Initial production release with full functionality |
 | 0.9 | 2024-09-25 | Added timestamp fixing and enhanced logging |
 | 0.8 | 2024-09-24 | Basic proxy functionality with URL cleaning |

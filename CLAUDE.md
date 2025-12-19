@@ -23,23 +23,13 @@ The `WebSocketProxy` class implements a bidirectional WebSocket proxy with OCPP-
 - `client->target`: Wallbox → EVCC (applies fixes to outgoing wallbox messages)
 - `target->client`: EVCC → Wallbox (applies transformations to incoming EVCC commands)
 
-**Key Message Transformations:**
+**Active Message Processing:**
 
-1. **URL Path Cleaning** (`clean_url_path`): Fixes malformed URLs like `ws://host:port//path` → `ws://host:port/path`
+The proxy operates in **pure passthrough mode** with only one active message filter:
 
-2. **Timestamp Fixing** (`fix_timestamp`, `_fix_timestamps_in_dict`): Replaces invalid timestamps (`0000-00-00T00:00:00.000Z`) with current UTC time
+**FirmwareStatusNotification Blocking** (`ocpp_proxy.py:711-720`): Blocks FirmwareStatusNotification messages from wallbox to EVCC since EVCC doesn't support this optional OCPP feature, eliminating unnecessary "NotSupported" error responses
 
-3. **IdTag Length Fixing** (`_fix_idtag_length`): Truncates or converts IdTag fields that exceed OCPP's 20-character limit
-
-4. **Power Conversion** (`_multiply_watts_by_10`): Multiplies watt values in MeterValues by 10 to correct wallbox reporting errors
-
-5. **Ampere to Watt Conversion** (`_convert_amperes_to_watts`): Converts SetChargingProfile commands from Amperes to Watts using 690 W/A ratio (based on empirical measurements)
-
-6. **SetChargingProfile Standardization** (`_standardize_set_charging_profile`): Rewrites SetChargingProfile messages into a standardized format that the wallbox accepts
-
-7. **Message Blocking** (`_should_block_message`): Blocks ChangeConfiguration commands except for OCPP B.7 configuration keys (LocalPreAuthorize, HeartbeatInterval, etc.)
-
-8. **FirmwareStatusNotification Blocking** (`ocpp_proxy.py:739-748`): Blocks FirmwareStatusNotification messages from wallbox to EVCC since EVCC doesn't support this optional OCPP feature, eliminating unnecessary "NotSupported" error responses
+All other messages are logged and forwarded unchanged in both directions (wallbox ↔ EVCC).
 
 ### Logging Architecture
 
@@ -206,21 +196,25 @@ sudo fuser -k 8888/tcp
 
 ### Current Transformation State (IMPORTANT)
 
-As of the latest firmware, most message transformations are **DISABLED** (`ocpp_proxy.py:267-271`). The proxy now runs in pure passthrough mode, only performing:
-- URL path passthrough (no cleaning needed since firmware V1.17.9)
-- TriggerMessage rejection workaround (for wallbox firmware flaw)
-- BootNotification forwarding and tracking
-- B.7 configuration key filtering (still active)
-- **FirmwareStatusNotification blocking** (active - eliminates unsupported feature errors)
+The proxy runs in **pure passthrough mode** with minimal intervention:
 
-Disabled transformations (commented out):
-- Timestamp fixing (`_fix_timestamps_in_dict`)
-- IdTag length fixing (`_fix_idtag_length`)
-- Power multiplication (`_multiply_watts_by_10`)
-- Ampere-to-watt conversion (`_convert_amperes_to_watts`)
-- SetChargingProfile standardization (`_standardize_set_charging_profile`)
+**ACTIVE:**
+- **FirmwareStatusNotification blocking** only - eliminates unsupported EVCC feature errors
 
-These can be re-enabled by uncommenting lines 268-270 if needed for different wallbox models.
+**ALL OTHER TRANSFORMATIONS DISABLED:**
+
+The following transformations exist in the codebase but are **disabled** and not executed:
+- URL path cleaning (`clean_url_path`) - not needed since firmware V1.17.9
+- Timestamp fixing (`_fix_timestamps_in_dict`) - commented out
+- IdTag length fixing (`_fix_idtag_length`) - commented out
+- Power multiplication (`_multiply_watts_by_10`) - commented out
+- Ampere-to-watt conversion (`_convert_amperes_to_watts`) - commented out
+- SetChargingProfile standardization (`_standardize_set_charging_profile`) - commented out
+- TriggerMessage rejection workaround - removed
+- BootNotification tracking/manipulation - removed
+- B.7 configuration key filtering - removed
+
+All messages (except FirmwareStatusNotification) flow through unchanged and are only logged for monitoring.
 
 ### OCPP Message Structure
 
@@ -231,27 +225,9 @@ OCPP 1.6 uses JSON arrays with different structures:
 
 When modifying messages, preserve the array structure and message type.
 
-### Ampere to Watt Conversion Factor
+### FirmwareStatusNotification Blocking
 
-The conversion uses **690 W/A** based on empirical measurements from the wallbox (6A observed = ~4100W). This is NOT the theoretical calculation but the actual wallbox behavior. Do not change this factor without real-world testing.
-
-### SetChargingProfile Message Format
-
-The wallbox requires a very specific format for SetChargingProfile messages. The `_standardize_set_charging_profile` method defines the exact structure with hardcoded values like `chargingProfileId: 231`, `stackLevel: 0`, and `numberPhases: 3`. These values are derived from what the wallbox actually accepts.
-
-### Configuration Key Filtering
-
-Only OCPP B.7 configuration keys are allowed through. This prevents EVCC from changing critical wallbox settings that might break functionality. The allowed B.7 keys are explicitly listed in `_should_block_message`.
-
-### TriggerMessage Workaround (`ocpp_proxy.py:785-798`)
-
-Some wallboxes reject EVCC's TriggerMessage commands (used to request BootNotification). The proxy works around this firmware flaw by:
-
-1. **Extracting boot info**: Captures wallbox identification from GetConfiguration responses
-2. **Intercepting rejections**: When the wallbox rejects TriggerMessage, the proxy changes the rejection to "Accepted" before forwarding to EVCC
-3. **Sending BootNotification**: The proxy sends the BootNotification to EVCC on behalf of the wallbox using the stored boot info
-
-This allows EVCC to properly register wallboxes even when they don't support TriggerMessage correctly.
+The only active message transformation. EVCC doesn't support the optional FirmwareStatusNotification OCPP feature. Without blocking, these messages generate "NotSupported" error responses (~6-10 messages per minute). Blocking eliminates this unnecessary traffic and reduces log noise.
 
 ## Utility Scripts
 
@@ -323,43 +299,72 @@ chargers:
 - EVCC OCPP port: 8887
 - Wallbox connects to: `ws://192.168.0.202:8887/[StationID]`
 
-**Cleaning EVCC Database (Fixing Corrupted State):**
+**EVCC Data Storage Locations:**
 
-If EVCC shows errors like "charger [db:2] cannot create charger 'db:2': timeout", the database has corrupted entries. To reset:
+EVCC stores persistent data in multiple locations that can cause old configurations to persist:
 
-**Method 1: Stop/Start (try this first):**
+1. **Configuration File** (YAML):
+   - Host path: `/addon_configs/49686a9f_evcc/evcc.yaml`
+   - Container path: `/config/evcc.yaml`
+   - Purpose: Main configuration (chargers, loadpoints, meters, vehicles)
+
+2. **SQLite Database** (Primary):
+   - Host path: `/mnt/data/supervisor/addons/data/49686a9f_evcc/evcc.db`
+   - Container path: `/data/evcc.db`
+   - Purpose: Runtime configuration, sessions, UI-based config changes
+   - **CRITICAL**: This is NOT at `/data/evcc.db` on the host! It's in a Docker volume.
+
+3. **Temporary Database Files** (Cache):
+   - Host path: `/tmp/evcc.db`, `/tmp/evcc_current.db`
+   - Purpose: EVCC may create temporary caches
+   - These can persist across restarts and restore old configurations
+
+**Cleaning EVCC Database (Getting Absolutely Clean Slate):**
+
+If EVCC shows errors like "charger [db:2] cannot create charger 'db:2': timeout" or loads old configurations (like the Elecq charger), the database has corrupted entries that persist across normal restarts.
+
+**PROPER Method to Delete All EVCC Data:**
 ```bash
 # 1. Stop EVCC add-on
 ha addons stop 49686a9f_evcc
 
-# 2. Wait for container to stop (check with: docker ps)
+# 2. Delete database from Docker volume (NOT from /data directly!)
+docker run --rm -v /mnt/data/supervisor/addons/data/49686a9f_evcc:/data alpine sh -c 'rm -f /data/evcc.db* && ls -la /data/'
 
-# 3. Start EVCC add-on (it will recreate database from evcc.yaml)
+# 3. Delete any temporary database files on host
+rm -f /tmp/evcc*.db*
+
+# 4. OPTIONAL: Reset configuration to minimal/empty
+echo "log: debug" > /addon_configs/49686a9f_evcc/evcc.yaml
+
+# 5. Start EVCC with completely clean slate
 ha addons start 49686a9f_evcc
 
-# 4. Monitor logs to confirm clean start
+# 6. Monitor logs to confirm clean start (no old chargers like "AE104ABG00029B")
 docker logs -f addon_49686a9f_evcc
 ```
 
-**Method 2: Uninstall/Reinstall (if stop/start doesn't work):**
+**Why Simple `/data/evcc.db` Deletion Doesn't Work:**
+
+The path `/data/evcc.db` doesn't exist on the Home Assistant host filesystem - it's inside the Docker container, mounted from `/mnt/data/supervisor/addons/data/49686a9f_evcc/`. Trying to delete `/data/evcc.db` from the host will fail with "No such file or directory".
+
+**Verification:**
 ```bash
-# 1. Backup configuration file
-cp /addon_configs/49686a9f_evcc/evcc.yaml /tmp/evcc.yaml.backup
+# Check database is gone (should show only options.json)
+docker run --rm -v /mnt/data/supervisor/addons/data/49686a9f_evcc:/data alpine ls -la /data/
 
-# 2. Uninstall EVCC add-on (removes corrupted database)
-ha addons uninstall 49686a9f_evcc
-
-# 3. Reinstall EVCC add-on
-ha addons install 49686a9f_evcc
-
-# 4. Start EVCC with fresh database
-ha addons start 49686a9f_evcc
-
-# 5. Monitor logs to confirm clean start
-docker logs -f addon_49686a9f_evcc
+# Check no temp databases exist
+ls -la /tmp/evcc*.db* 2>&1
 ```
 
-The database is stored in a Docker volume and persists between restarts. Method 1 usually works, but if the database is severely corrupted, Method 2 (uninstall/reinstall) completely removes the old database and starts fresh. The configuration file at `/addon_configs/49686a9f_evcc/evcc.yaml` is preserved during uninstall.
+**Alternative Method (Uninstall/Reinstall):**
+```bash
+# Complete nuclear option - removes everything
+ha addons uninstall 49686a9f_evcc
+ha addons install 49686a9f_evcc
+```
+
+The database is stored in a Docker volume and persists between normal restarts. Using `ha addons stop` and deleting from the Docker volume ensures all persistent data is removed.
 
 
 ## Important Paths
@@ -369,3 +374,5 @@ The database is stored in a Docker volume and persists between restarts. Method 
 - Systemd service: `/etc/systemd/system/ocpp-proxy.service`
 - Documentation: `/home/OCPP-Proxy/Wallbox-EVCC-Proxy-FSD.md`
 - mo functional description in claude.md
+- only push manually
+- only update claude.md manually

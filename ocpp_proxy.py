@@ -76,6 +76,11 @@ class WebSocketProxy:
         # Wallboxes are added when they send BootNotification, removed when EVCC acknowledges
         self.pending_boot_wallboxes = {}  # {station_id: {'boot_info': {...}, 'last_sent': timestamp, 'evcc_confirmed': False}}
         self.boot_lock = threading.Lock()
+        # Track pending TriggerMessage requests for StatusNotification
+        self.pending_trigger_requests = {}  # {station_id: {'message_id': id, 'requested_message': type, 'timestamp': datetime, 'connector_id': int}}
+        self.trigger_lock = threading.Lock()
+        # Track connector status per wallbox
+        self.connector_status = {}  # {station_id: {'status': 'Available', 'error_code': 'NoError', 'connector_id': 1, 'transaction_id': None}}
 
     def _add_message_to_buffer(self, direction, message, tag="", station_id=""):
         """Add message to circular buffer for web interface"""
@@ -374,6 +379,72 @@ class WebSocketProxy:
                 for item in value:
                     if isinstance(item, dict):
                         self._multiply_watts_by_10(item)
+
+    def _add_power_active_import(self, data, action):
+        """Calculate and inject Power.Active.Import if missing in MeterValues"""
+        if not isinstance(data, dict):
+            return
+
+        # Only process MeterValues messages
+        if action != "MeterValues":
+            return
+
+        # Look for MeterValues messages
+        if 'meterValue' in data and isinstance(data['meterValue'], list):
+            for meter_value in data['meterValue']:
+                if isinstance(meter_value, dict) and 'sampledValue' in meter_value:
+                    if isinstance(meter_value['sampledValue'], list):
+                        sampled_values = meter_value['sampledValue']
+
+                        # Check if Power.Active.Import already exists
+                        has_power = any(
+                            sv.get('measurand') == 'Power.Active.Import'
+                            for sv in sampled_values if isinstance(sv, dict)
+                        )
+
+                        if has_power:
+                            continue  # Already have power values, skip
+
+                        # Collect current and voltage values for each phase
+                        currents = {}  # {phase: value}
+                        voltages = {}  # {phase: value}
+
+                        for sv in sampled_values:
+                            if not isinstance(sv, dict):
+                                continue
+
+                            measurand = sv.get('measurand', '')
+                            phase = sv.get('phase', '')
+                            value_str = sv.get('value', '')
+
+                            try:
+                                value = float(value_str)
+
+                                if measurand == 'Current.Import' and phase in ['L1', 'L2', 'L3']:
+                                    currents[phase] = value
+                                elif measurand == 'Voltage' and phase in ['L1', 'L2', 'L3']:
+                                    voltages[phase] = value
+                            except (ValueError, TypeError):
+                                continue
+
+                        # Calculate total power if we have data for all three phases
+                        if len(currents) == 3 and len(voltages) == 3:
+                            total_power = 0.0
+                            for phase in ['L1', 'L2', 'L3']:
+                                if phase in currents and phase in voltages:
+                                    # Power = Voltage × Current
+                                    total_power += voltages[phase] * currents[phase]
+
+                            # Add Power.Active.Import to sampledValue array
+                            power_sample = {
+                                "value": str(int(total_power)),
+                                "context": sv.get('context', 'Sample.Periodic'),  # Use same context as other values
+                                "format": "Raw",
+                                "measurand": "Power.Active.Import",
+                                "unit": "W"
+                            }
+                            sampled_values.append(power_sample)
+                            logger.info(f"Injected Power.Active.Import: {int(total_power)}W (calculated from current and voltage)")
 
     def _convert_amperes_to_watts(self, message_data):
         """Convert ampere limits to watt limits in SetChargingProfile commands"""
@@ -696,128 +767,285 @@ class WebSocketProxy:
             await websocket.close(1011, "EVCC backend not available")
             return
 
+    def _track_trigger_message(self, station_id, message_id, connector_id, wallbox_ws, evcc_ws):
+        """Track TriggerMessage request and schedule StatusNotification response if wallbox doesn't respond"""
+        with self.trigger_lock:
+            self.pending_trigger_requests[station_id] = {
+                'message_id': message_id,
+                'connector_id': connector_id,
+                'timestamp': datetime.now(),
+                'wallbox_ws': wallbox_ws,
+                'evcc_ws': evcc_ws
+            }
+            logger.info(f"Tracked TriggerMessage from EVCC for {station_id}, connector {connector_id}")
+
+        # Schedule task to send StatusNotification if wallbox doesn't respond in 3 seconds
+        asyncio.create_task(self._send_status_notification_if_needed(station_id, message_id, connector_id, wallbox_ws, evcc_ws))
+
+    async def _send_status_notification_if_needed(self, station_id, message_id, connector_id, wallbox_ws, evcc_ws):
+        """Send StatusNotification to EVCC if wallbox doesn't respond within timeout"""
+        await asyncio.sleep(3)  # Wait 3 seconds for wallbox to respond
+
+        with self.trigger_lock:
+            # Check if trigger request still pending (wallbox hasn't responded)
+            if station_id in self.pending_trigger_requests:
+                pending = self.pending_trigger_requests[station_id]
+                if pending['message_id'] == message_id:
+                    # Wallbox didn't respond, send StatusNotification on its behalf
+                    logger.info(f"Wallbox {station_id} didn't respond to TriggerMessage, sending StatusNotification")
+
+                    # Get current status or default to Available
+                    status_info = self.connector_status.get(station_id, {
+                        'status': 'Available',
+                        'error_code': 'NoError',
+                        'connector_id': connector_id,
+                        'transaction_id': None
+                    })
+
+                    # Generate unique message ID for StatusNotification
+                    status_msg_id = str(random.randint(1000000, 9999999))
+
+                    # Create StatusNotification message
+                    status_notification = [
+                        2,  # CALL message
+                        status_msg_id,
+                        "StatusNotification",
+                        {
+                            "connectorId": connector_id,
+                            "status": status_info['status'],
+                            "errorCode": status_info['error_code'],
+                            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                        }
+                    ]
+
+                    status_json = json.dumps(status_notification)
+
+                    # Send to EVCC as if it came from wallbox
+                    try:
+                        await evcc_ws.send(status_json)
+                        ocpp_logger.info(f"[client->target-SYNTHETIC] {status_json}")
+                        self._add_message_to_buffer("client->target", status_json, "SYNTHETIC", station_id)
+                        logger.info(f"Sent synthetic StatusNotification to EVCC for {station_id}")
+
+                        # Also need to send TriggerMessage response to wallbox saying Accepted
+                        trigger_response = [
+                            3,  # CALL RESULT
+                            message_id,
+                            {"status": "Accepted"}
+                        ]
+                        trigger_response_json = json.dumps(trigger_response)
+                        await wallbox_ws.send(trigger_response_json)
+                        ocpp_logger.info(f"[target->client-SYNTHETIC] {trigger_response_json}")
+                        logger.info(f"Sent synthetic TriggerMessage response to wallbox {station_id}")
+
+                    except Exception as e:
+                        logger.error(f"Error sending synthetic StatusNotification: {e}")
+
+                    # Remove from pending
+                    del self.pending_trigger_requests[station_id]
+
+    def _track_status_notification(self, station_id, parsed_message):
+        """Track StatusNotification from wallbox and clear pending trigger"""
+        if len(parsed_message) >= 4:
+            payload = parsed_message[3]
+            if isinstance(payload, dict):
+                # Update connector status
+                connector_id = payload.get('connectorId', 1)
+                status = payload.get('status', 'Unknown')
+                error_code = payload.get('errorCode', 'NoError')
+
+                self.connector_status[station_id] = {
+                    'status': status,
+                    'error_code': error_code,
+                    'connector_id': connector_id,
+                    'transaction_id': self.connector_status.get(station_id, {}).get('transaction_id')
+                }
+                logger.info(f"Tracked StatusNotification from {station_id}: connector {connector_id} status={status}")
+
+                # Clear pending trigger request since wallbox responded
+                with self.trigger_lock:
+                    if station_id in self.pending_trigger_requests:
+                        del self.pending_trigger_requests[station_id]
+                        logger.info(f"Cleared pending TriggerMessage for {station_id} (wallbox responded)")
+
+    def _track_transaction_start(self, station_id, parsed_message):
+        """Track StartTransaction to update connector status"""
+        if len(parsed_message) >= 4:
+            payload = parsed_message[3]
+            if isinstance(payload, dict):
+                connector_id = payload.get('connectorId', 1)
+                if station_id not in self.connector_status:
+                    self.connector_status[station_id] = {}
+                self.connector_status[station_id]['status'] = 'Charging'
+                self.connector_status[station_id]['connector_id'] = connector_id
+                logger.info(f"Tracked StartTransaction from {station_id}: connector {connector_id} → Charging")
+
+    def _track_transaction_stop(self, station_id, parsed_message):
+        """Track StopTransaction to update connector status"""
+        if len(parsed_message) >= 4:
+            payload = parsed_message[3]
+            if isinstance(payload, dict):
+                if station_id not in self.connector_status:
+                    self.connector_status[station_id] = {}
+                self.connector_status[station_id]['status'] = 'Available'
+                self.connector_status[station_id]['transaction_id'] = None
+                logger.info(f"Tracked StopTransaction from {station_id} → Available")
+
     async def proxy_messages(self, source_ws, dest_ws, direction, station_id=""):
         """Proxy messages between WebSocket connections"""
         try:
             async for message in source_ws:
-                original_message = message
+                # Check if we should block this message
+                should_block = False
 
-                # Process messages based on direction
-                if direction == "target->client":
-                    # Messages from evcc to wallbox
-                    # Track BootNotification responses from EVCC
-                    try:
-                        parsed_message = json.loads(message)
-
-                        # Check for BootNotification response from EVCC
-                        if (isinstance(parsed_message, list) and
-                            len(parsed_message) >= 3 and
-                            parsed_message[0] == 3):  # CallResult
-                            # Check if this is a BootNotification response
-                            payload = parsed_message[2]
-                            if isinstance(payload, dict) and 'status' in payload and payload.get('status') == 'Accepted':
-                                # Likely a BootNotification response
-                                # Check if we have a pending boot for this station
-                                with self.boot_lock:
-                                    if station_id in self.pending_boot_wallboxes:
-                                        self.pending_boot_wallboxes[station_id]['evcc_confirmed'] = True
-                                        logger.info(f"EVCC confirmed BootNotification for {station_id} - stopping periodic sends")
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.debug(f"Could not parse message to check for TriggerMessage: {e}")
-
-                    # Just log and forward without modification
-                    ocpp_logger.info(f"[{direction}] {message}")
-                    self._add_message_to_buffer(direction, message, "", station_id)
-
-                elif direction == "client->target":
+                if direction == "client->target":
                     # Messages from wallbox to evcc
-                    # Track BootNotifications and extract wallbox info from GetConfiguration
-                    # Also intercept TriggerMessage rejections
                     try:
                         parsed_message = json.loads(message)
 
-                        # Block FirmwareStatusNotification messages (EVCC doesn't support them)
+                        # FirmwareStatusNotification blocking DISABLED - allowing all messages through
+                        # (Previously blocked, now forwarding to test EVCC compatibility)
+
+                        # Track StatusNotification responses
                         if (isinstance(parsed_message, list) and
                             len(parsed_message) >= 4 and
                             parsed_message[0] == 2 and
-                            parsed_message[2] == "FirmwareStatusNotification"):
-                            # Log as blocked and don't forward to EVCC
-                            ocpp_logger.info(f"[{direction}-BLOCKED] {message}")
-                            self._add_message_to_buffer(direction, message, "BLOCKED", station_id)
-                            logger.info(f"Blocked FirmwareStatusNotification from {station_id} (EVCC doesn't support this feature)")
-                            continue  # Skip forwarding to EVCC
+                            parsed_message[2] == "StatusNotification"):
+                            # Wallbox sent StatusNotification - track it and remove pending trigger
+                            self._track_status_notification(station_id, parsed_message)
 
-                        # Track BootNotification messages (but don't block them)
-                        if (isinstance(parsed_message, list) and
-                            len(parsed_message) >= 4 and
-                            parsed_message[0] == 2 and
-                            parsed_message[2] == "BootNotification"):
-                            # Store boot info for future reference
-                            payload = parsed_message[3] if len(parsed_message) > 3 else {}
-                            with self.boot_lock:
-                                self.pending_boot_wallboxes[station_id] = {
-                                    'boot_info': payload,
-                                    'last_sent': datetime.now(),
-                                    'evcc_confirmed': False
-                                }
-                            logger.info(f"Passing through BootNotification from {station_id} to EVCC")
-
-                        # Extract wallbox info from GetConfiguration response
+                        # Track transaction states
                         elif (isinstance(parsed_message, list) and
-                              len(parsed_message) >= 3 and
-                              parsed_message[0] == 3):  # CallResult
-                            # Check if this is a GetConfiguration response
-                            payload = parsed_message[2]
-                            if isinstance(payload, dict) and 'configurationKey' in payload:
-                                # Extract wallbox info from configuration keys
-                                config_keys = {item['key']: item.get('value', '')
-                                             for item in payload['configurationKey']
-                                             if isinstance(item, dict)}
+                              len(parsed_message) >= 4 and
+                              parsed_message[0] == 2):
+                            action = parsed_message[2]
+                            if action == "StartTransaction":
+                                self._track_transaction_start(station_id, parsed_message)
+                            elif action == "StopTransaction":
+                                self._track_transaction_stop(station_id, parsed_message)
 
-                                if 'ChargingStationModel' in config_keys:
-                                    boot_info = {
-                                        'chargePointModel': config_keys.get('ChargingStationModel', ''),
-                                        'chargePointVendor': config_keys.get('ChargingStationVendorName', ''),
-                                        'chargePointSerialNumber': config_keys.get('ChargingStationSerialNumber', ''),
-                                        'firmwareVersion': config_keys.get('ChargingStationFirmwareVersion', '')
-                                    }
-
-                                    # Store wallbox info for later use when EVCC requests BootNotification
-                                    with self.boot_lock:
-                                        if station_id not in self.pending_boot_wallboxes or not self.pending_boot_wallboxes[station_id].get('evcc_confirmed', False):
-                                            self.pending_boot_wallboxes[station_id] = {
-                                                'boot_info': boot_info,
-                                                'last_sent': datetime.now(),
-                                                'evcc_confirmed': False
-                                            }
-                                            logger.info(f"Extracted BootNotification info from GetConfiguration for {station_id}: {boot_info}")
-                                            logger.info(f"Will send BootNotification when EVCC requests via TriggerMessage")
-
-                            # Intercept TriggerMessage rejections (wallbox flaw workaround)
-                            elif isinstance(payload, dict) and payload.get('status') == 'Rejected':
-                                # Check if we have boot info stored for this wallbox
-                                with self.boot_lock:
-                                    if station_id in self.pending_boot_wallboxes:
-                                        boot_info = self.pending_boot_wallboxes[station_id]['boot_info']
-                                        # Change rejection to acceptance for EVCC
-                                        parsed_message[2] = {'status': 'Accepted'}
-                                        message = json.dumps(parsed_message)
-                                        logger.info(f"Intercepted TriggerMessage rejection from {station_id}, changed to Accepted for EVCC")
-
-                                        # Send the actual BootNotification to EVCC
-                                        logger.info(f"Sending BootNotification to EVCC for {station_id} with info: {boot_info}")
-                                        asyncio.create_task(self._send_boot_notification_now(station_id, boot_info))
                     except (json.JSONDecodeError, Exception) as e:
-                        logger.debug(f"Could not parse message to check for BootNotification: {e}")
+                        logger.debug(f"Could not parse message for blocking check: {e}")
 
-                    # Just log and forward without modification
+                elif direction == "target->client":
+                    # Messages from EVCC to wallbox
+                    try:
+                        parsed_message = json.loads(message)
+
+                        # Intercept ChangeAvailability - wallbox doesn't support this optional command
+                        if (isinstance(parsed_message, list) and
+                            len(parsed_message) >= 4 and
+                            parsed_message[0] == 2 and
+                            parsed_message[2] == "ChangeAvailability"):
+                            message_id = parsed_message[1]
+                            # Log the intercepted command
+                            ocpp_logger.info(f"[{direction}-AUTO-RESPONSE] {message}")
+                            self._add_message_to_buffer(direction, message, "AUTO-RESPONSE", station_id)
+                            logger.info(f"Intercepted ChangeAvailability from EVCC - sending auto-response and forwarding to wallbox")
+
+                            # Send acceptance response on behalf of wallbox
+                            response = [3, message_id, {"status": "Accepted"}]
+                            response_json = json.dumps(response)
+                            ocpp_logger.info(f"[client->target-AUTO-RESPONSE] {response_json}")
+                            self._add_message_to_buffer("client->target", response_json, "AUTO-RESPONSE", station_id)
+                            await source_ws.send(response_json)
+                            logger.info(f"Sent ChangeAvailability response (Accepted) to EVCC on behalf of wallbox")
+
+                        # Intercept GetConfiguration - provide minimal supported configuration
+                        if (isinstance(parsed_message, list) and
+                            len(parsed_message) >= 4 and
+                            parsed_message[0] == 2 and
+                            parsed_message[2] == "GetConfiguration"):
+                            message_id = parsed_message[1]
+                            payload = parsed_message[3]
+                            # Log the intercepted command
+                            ocpp_logger.info(f"[{direction}-AUTO-RESPONSE] {message}")
+                            self._add_message_to_buffer(direction, message, "AUTO-RESPONSE", station_id)
+                            logger.info(f"Intercepted GetConfiguration from EVCC - sending auto-response and forwarding to wallbox")
+
+                            # Build configuration response with OCPP B.7 keys
+                            requested_keys = payload.get('key', []) if isinstance(payload, dict) else []
+                            config_keys = [
+                                {"key": "HeartbeatInterval", "readonly": False, "value": "60"},
+                                {"key": "LocalPreAuthorize", "readonly": False, "value": "true"},
+                                {"key": "LocalAuthorizeOffline", "readonly": False, "value": "false"},
+                                {"key": "LocalAuthListEnabled", "readonly": False, "value": "false"},
+                                {"key": "AuthorizeRemoteTxRequests", "readonly": False, "value": "false"}
+                            ]
+
+                            # If specific keys requested, filter to those keys
+                            if requested_keys:
+                                config_keys = [k for k in config_keys if k['key'] in requested_keys]
+
+                            response = [3, message_id, {
+                                "configurationKey": config_keys,
+                                "unknownKey": []
+                            }]
+                            response_json = json.dumps(response)
+                            ocpp_logger.info(f"[client->target-AUTO-RESPONSE] {response_json}")
+                            self._add_message_to_buffer("client->target", response_json, "AUTO-RESPONSE", station_id)
+                            await source_ws.send(response_json)
+                            logger.info(f"Sent GetConfiguration response to EVCC with {len(config_keys)} configuration keys")
+
+                        # Intercept TriggerMessage requests from EVCC
+                        elif (isinstance(parsed_message, list) and
+                            len(parsed_message) >= 4 and
+                            parsed_message[0] == 2 and
+                            parsed_message[2] == "TriggerMessage"):
+                            payload = parsed_message[3]
+                            requested_message = payload.get('requestedMessage') if isinstance(payload, dict) else None
+
+                            # Handle TriggerMessage for BootNotification
+                            # DISABLED: Testing wallbox behavior without auto-response
+                            if requested_message == 'BootNotification':
+                                message_id = parsed_message[1]
+                                # Log the intercepted command
+                                ocpp_logger.info(f"[{direction}-AUTO-RESPONSE] {message}")
+                                self._add_message_to_buffer(direction, message, "AUTO-RESPONSE", station_id)
+                                logger.info(f"Intercepted TriggerMessage(BootNotification) from EVCC - sending auto-response and forwarding to wallbox")
+
+                                # Send TriggerMessage response (Accepted)
+                                trigger_response = [3, message_id, {"status": "Accepted"}]
+                                trigger_response_json = json.dumps(trigger_response)
+                                ocpp_logger.info(f"[client->target-AUTO-RESPONSE] {trigger_response_json}")
+                                self._add_message_to_buffer("client->target", trigger_response_json, "AUTO-RESPONSE", station_id)
+                                await source_ws.send(trigger_response_json)
+                                logger.info(f"Sent TriggerMessage response (Accepted) to EVCC")
+
+                                # Generate a new message ID for the BootNotification
+                                import random
+                                boot_msg_id = str(random.randint(1000, 9999))
+
+                                # Send BootNotification on behalf of wallbox (to EVCC)
+                                boot_notification = [2, boot_msg_id, "BootNotification", {
+                                    "chargePointModel": "EV-AC22K",
+                                    "chargePointVendor": "AcTEC",
+                                    "chargePointSerialNumber": "Actec",
+                                    "firmwareVersion": "V1.17.9"
+                                }]
+                                boot_json = json.dumps(boot_notification)
+                                ocpp_logger.info(f"[client->target-AUTO-RESPONSE] {boot_json}")
+                                self._add_message_to_buffer("client->target", boot_json, "AUTO-RESPONSE", station_id)
+                                # Send to EVCC (source_ws in target->client direction)
+                                await source_ws.send(boot_json)
+                                logger.info(f"Sent BootNotification to EVCC on behalf of wallbox")
+
+                            # Handle TriggerMessage for StatusNotification
+                            elif requested_message == 'StatusNotification':
+                                # Store the trigger request and schedule response if wallbox doesn't reply
+                                message_id = parsed_message[1]
+                                connector_id = payload.get('connectorId', 1)
+                                self._track_trigger_message(station_id, message_id, connector_id, dest_ws, source_ws)
+
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.debug(f"Could not parse message for auto-response: {e}")
+
+                # Log and forward all non-blocked messages
+                if not should_block:
                     ocpp_logger.info(f"[{direction}] {message}")
                     self._add_message_to_buffer(direction, message, "", station_id)
-                else:
-                    ocpp_logger.info(f"[{direction}] {message}")
-
-                logger.debug(f"Proxying message ({direction}): {message[:100]}...")
-                await dest_ws.send(message)
+                    logger.debug(f"Proxying message ({direction}): {message[:100]}...")
+                    await dest_ws.send(message)
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Connection closed ({direction})")
         except Exception as e:
