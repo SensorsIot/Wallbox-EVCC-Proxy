@@ -91,23 +91,70 @@ The proxy uses only Python standard library modules otherwise (`asyncio`, `json`
 
 ## Development Commands
 
-### Running the Proxy
+### Initial Setup and Starting the Proxy
 
-**Manual run with default settings:**
+**First-time setup (create systemd service):**
 ```bash
-./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887
-```
+# Create the systemd service file
+sudo tee /etc/systemd/system/ocpp-proxy.service > /dev/null << 'EOF'
+[Unit]
+Description=OCPP WebSocket Proxy
+After=network.target
 
-**With debug logging:**
-```bash
-./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887 --debug
-```
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/OCPP-Proxy
+ExecStart=/home/OCPP-Proxy/ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
-**As systemd service:**
-```bash
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Reload systemd, enable and start the service
+sudo systemctl daemon-reload
+sudo systemctl enable ocpp-proxy.service
 sudo systemctl start ocpp-proxy.service
+
+# Verify it's running
 sudo systemctl status ocpp-proxy.service
-sudo systemctl restart ocpp-proxy.service
+```
+
+The proxy will now:
+- Start automatically on boot (enabled)
+- Restart automatically if it crashes (RestartSec=5)
+- Listen on port 8888 for wallbox connections
+- Forward to EVCC on 192.168.0.202:8887
+- Serve web interface on port 8889
+
+**Service management commands:**
+```bash
+sudo systemctl start ocpp-proxy.service     # Start the service
+sudo systemctl stop ocpp-proxy.service      # Stop the service
+sudo systemctl restart ocpp-proxy.service   # Restart the service
+sudo systemctl status ocpp-proxy.service    # Check status
+sudo systemctl disable ocpp-proxy.service   # Disable auto-start on boot
+```
+
+**Manual run (without systemd):**
+```bash
+# Basic run
+./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887
+
+# With debug logging
+./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887 --debug
+
+# Custom web interface port
+./ocpp_proxy.py --listen-port 8888 --target-host 192.168.0.202 --target-port 8887 --web-port 8889
+```
+
+**Kill manual instance if needed:**
+```bash
+sudo fuser -k 8888/tcp
 ```
 
 ### Testing
