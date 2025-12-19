@@ -117,6 +117,42 @@ Client          Proxy Server         Target Server
 - Prevents conflicts with EVCC's own configuration commands
 - Eliminates need for manual configuration
 
+### 3.3b BootNotification Behavior Analysis (FR-003b)
+
+**Description**: Understanding wallbox BootNotification behavior with EVCC
+
+**Observed Behavior (Actec Wallbox)**:
+
+**When Wallbox Connects to EVCC**:
+1. Wallbox (Actec) initiates WebSocket connection to EVCC
+2. **BootNotification is NOT automatically sent on reconnection**
+3. Actec only sends BootNotification when:
+   - Wallbox is power-cycled (rebooted)
+   - EVCC server restarts (wallbox detects server restart and re-sends BootNotification)
+
+**EVCC's Response Sequence After BootNotification**:
+1. **ChangeAvailability** - EVCC asks if wallbox connector is operational
+2. **GetConfiguration** - EVCC requests wallbox configuration parameters
+3. **Heartbeat exchanges** - Regular keep-alive messages every ~60 seconds
+4. **TriggerMessage** - EVCC may request MeterValues or other data
+
+**Critical Finding - EVCC Initialization Timeout**:
+- EVCC waits up to 90 seconds for BootNotification during startup
+- If wallbox doesn't send BootNotification, EVCC crashes with timeout error
+- Error: `cannot create charger 'db:X': cannot create charger type 'ocpp': timeout`
+- EVCC will retry after 15 minutes
+
+**Workaround for Non-Compliant Wallboxes**:
+If a wallbox doesn't send BootNotification on EVCC restart:
+1. Power-cycle the wallbox to trigger BootNotification, OR
+2. Implement proxy logic to send stored BootNotification on behalf of wallbox, OR
+3. Ensure wallbox reconnects when EVCC restarts (triggers BootNotification)
+
+**Protocol Compliance Note**:
+- Standard OCPP behavior: Wallbox should send BootNotification on every connection
+- Actec behavior: Only sends BootNotification on power-up or server restart detection
+- This non-standard behavior can cause EVCC initialization failures
+
 ### 3.4 Logging System (FR-004)
 
 **Description**: Comprehensive logging for monitoring and debugging

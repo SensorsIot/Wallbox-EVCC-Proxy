@@ -12,6 +12,7 @@ import logging.handlers
 import argparse
 import json
 import re
+import random
 from datetime import datetime
 from websockets.legacy.server import serve
 from aiohttp import web
@@ -71,15 +72,20 @@ class WebSocketProxy:
             }
         }
         self.status_lock = threading.Lock()
+        # Track all wallboxes that need periodic boot notifications
+        # Wallboxes are added when they send BootNotification, removed when EVCC acknowledges
+        self.pending_boot_wallboxes = {}  # {station_id: {'boot_info': {...}, 'last_sent': timestamp, 'evcc_confirmed': False}}
+        self.boot_lock = threading.Lock()
 
-    def _add_message_to_buffer(self, direction, message, tag=""):
+    def _add_message_to_buffer(self, direction, message, tag="", station_id=""):
         """Add message to circular buffer for web interface"""
         with self.buffer_lock:
             self.message_buffer.append({
                 'timestamp': datetime.now().isoformat(),
                 'direction': direction,
                 'message': message,
-                'tag': tag
+                'tag': tag,
+                'station_id': station_id
             })
         # Also extract live status data
         self._extract_status_data(direction, message)
@@ -258,9 +264,11 @@ class WebSocketProxy:
 
                 # Look for timestamp fields in the payload
                 if isinstance(payload, dict):
-                    self._fix_timestamps_in_dict(payload)
-                    self._fix_idtag_length(payload)
-                    self._multiply_watts_by_10(payload)
+                    # DISABLED: Pure passthrough mode - no transformations
+                    # self._fix_timestamps_in_dict(payload)
+                    # self._fix_idtag_length(payload)
+                    # self._multiply_watts_by_10(payload)
+                    pass
 
                 # Return the fixed message
                 return json.dumps(data)
@@ -534,51 +542,161 @@ class WebSocketProxy:
             # Wait a bit before sending next command
             await asyncio.sleep(0.5)
 
+    async def _send_boot_notification_now(self, station_id, boot_info):
+        """Send a BootNotification immediately to EVCC"""
+        import random
+        try:
+            target_url = f"ws://{self.target_host}:{self.target_port}{station_id}"
+            logger.info(f"Sending immediate BootNotification to EVCC for {station_id}")
+            async with websockets.connect(target_url, subprotocols=["ocpp1.6"], open_timeout=2) as evcc_ws:
+                msg_id = str(random.randint(1000000000, 9999999999))
+                boot_msg = [2, msg_id, "BootNotification", boot_info]
+                await evcc_ws.send(json.dumps(boot_msg))
+                ocpp_logger.info(f"[IMMEDIATE-BOOT] Sent to EVCC for {station_id}: {json.dumps(boot_msg)}")
+
+                # Wait for response
+                try:
+                    response = await asyncio.wait_for(evcc_ws.recv(), timeout=5.0)
+                    ocpp_logger.info(f"[IMMEDIATE-BOOT] EVCC response for {station_id}: {response}")
+
+                    # Parse response to see if accepted
+                    resp_data = json.loads(response)
+                    if isinstance(resp_data, list) and len(resp_data) >= 3 and resp_data[0] == 3:
+                        # CallResult received
+                        payload = resp_data[2]
+                        if isinstance(payload, dict) and payload.get('status') == 'Accepted':
+                            logger.info(f"EVCC immediately accepted BootNotification for {station_id}")
+                            with self.boot_lock:
+                                if station_id in self.pending_boot_wallboxes:
+                                    self.pending_boot_wallboxes[station_id]['evcc_confirmed'] = True
+                                    self.pending_boot_wallboxes[station_id]['last_sent'] = datetime.now()
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout waiting for EVCC response for immediate BootNotification {station_id}")
+        except Exception as e:
+            logger.debug(f"Could not send immediate BootNotification to EVCC for {station_id}: {e}")
+
+    async def _send_startup_boot_notifications(self):
+        """Send BootNotifications for known wallboxes immediately after proxy starts"""
+        # Hardcoded wallbox information
+        wallboxes = [
+            {
+                "path": "/Actec",
+                "delay": 0,  # Send immediately
+                "boot_info": {
+                    "chargePointModel": "AcTec SmartCharger",
+                    "chargePointVendor": "AcTec",
+                    "chargePointSerialNumber": "Actec",
+                    "firmwareVersion": "V1.0.0"
+                }
+            },
+            {
+                "path": "/AE104ABG00029B",
+                "delay": 10,  # Send 10 seconds later
+                "boot_info": {
+                    "chargePointModel": "AE104",
+                    "chargePointVendor": "ELECQ",
+                    "chargePointSerialNumber": "AE104ABG00029B",
+                    "firmwareVersion": "EPRO001_V1.2.0(7-1761213148)"
+                }
+            }
+        ]
+
+        for wallbox in wallboxes:
+            await asyncio.sleep(wallbox["delay"])
+            try:
+                # Connect to EVCC for this wallbox
+                target_url = f"ws://{self.target_host}:{self.target_port}{wallbox['path']}"
+                logger.info(f"Sending startup BootNotification for {wallbox['path']} to {target_url}")
+
+                async with websockets.connect(target_url, subprotocols=["ocpp1.6"], open_timeout=5) as ws:
+                    msg_id = str(random.randint(1000000000, 9999999999))
+                    boot_msg = [2, msg_id, "BootNotification", wallbox["boot_info"]]
+                    await ws.send(json.dumps(boot_msg))
+                    logger.info(f"Sent BootNotification to EVCC for {wallbox['path']}: {json.dumps(boot_msg)}")
+
+                    # Wait for response
+                    try:
+                        response = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                        logger.info(f"EVCC response for {wallbox['path']}: {response}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout waiting for EVCC response for {wallbox['path']}")
+            except Exception as e:
+                logger.error(f"Failed to send BootNotification for {wallbox['path']}: {e}")
+
+    async def _background_tasks(self):
+        """Simple background loop for monitoring tasks (no periodic BootNotifications per OCPP protocol)"""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Monitor every 60 seconds
+
+                # Just log status of tracked wallboxes
+                with self.boot_lock:
+                    if self.pending_boot_wallboxes:
+                        logger.debug(f"Tracking {len(self.pending_boot_wallboxes)} wallboxes for BootNotification handling")
+
+            except Exception as e:
+                logger.error(f"Background task error: {e}")
+                await asyncio.sleep(5)
+
     async def handle_client(self, websocket, path):
         """Handle incoming client connection and proxy to target"""
         client_address = websocket.remote_address
         logger.info(f"New client connection from {client_address} requesting path: {path}")
 
-        # Clean the path
-        cleaned_path = self.clean_url_path(path)
-        logger.info(f"Cleaned path: {cleaned_path}")
+        # DISABLED: Path cleaning (firmware V1.17.9 no longer needs this)
+        # cleaned_path = self.clean_url_path(path)
+        cleaned_path = path  # Pass through unchanged
+        logger.info(f"Path (no cleaning): {cleaned_path}")
 
         # Build target URL
         target_url = f"ws://{self.target_host}:{self.target_port}{cleaned_path}"
-        logger.info(f"Connecting to target: {target_url}")
+        logger.info(f"Attempting to connect to target: {target_url}")
 
+        # Get subprotocols from the client
         try:
-            # Get subprotocols from the client
-            try:
-                client_subprotocols = getattr(websocket, 'subprotocols', [])
-                logger.info(f"Client subprotocols: {client_subprotocols}")
-            except:
-                client_subprotocols = ["ocpp1.6"]  # Default to OCPP
-                logger.info(f"Using default subprotocols: {client_subprotocols}")
+            client_subprotocols = getattr(websocket, 'subprotocols', [])
+            logger.info(f"Client subprotocols: {client_subprotocols}")
+        except:
+            client_subprotocols = ["ocpp1.6"]  # Default to OCPP
+            logger.info(f"Using default subprotocols: {client_subprotocols}")
 
-            # Connect to the target server with OCPP subprotocol
-            async with websockets.connect(
+        # Try to connect to target server
+        target_ws = None
+        try:
+            target_ws = await websockets.connect(
                 target_url,
                 subprotocols=["ocpp1.6"]
-            ) as target_ws:
-                logger.info(f"Connected to target server, starting proxy for {client_address}")
-                logger.info(f"Target subprotocol: {target_ws.subprotocol}")
+            )
+            logger.info(f"Connected to target server, starting bidirectional proxy for {client_address}")
+            logger.info(f"Target subprotocol: {target_ws.subprotocol}")
 
-                # Store target_ws for config commands
-                self.current_target_ws = target_ws
-                self.current_client_ws = websocket
+            # Store connections for config commands
+            self.current_target_ws = target_ws
+            self.current_client_ws = websocket
 
-                # Create bidirectional proxy
+            # Create bidirectional proxy
+            try:
                 await asyncio.gather(
-                    self.proxy_messages(websocket, target_ws, "client->target"),
-                    self.proxy_messages(target_ws, websocket, "target->client"),
+                    self.proxy_messages(websocket, target_ws, "client->target", cleaned_path),
+                    self.proxy_messages(target_ws, websocket, "target->client", cleaned_path),
                     return_exceptions=True
                 )
+            except Exception as proxy_error:
+                logger.warning(f"Proxy error for {client_address}: {proxy_error}")
+            finally:
+                # If EVCC connection drops, close wallbox connection too
+                logger.info(f"Closing wallbox connection {client_address} - bidirectional proxy ended")
+                await websocket.close(1011, "Backend connection lost")
+                await target_ws.close()
         except Exception as e:
-            logger.error(f"Error connecting to target server {target_url}: {e}")
-            await websocket.close(code=1002, reason=f"Target connection failed: {e}")
+            logger.warning(f"Cannot connect to target server {target_url}: {e}")
+            logger.info(f"Disconnecting wallbox {client_address} - EVCC is not available")
 
-    async def proxy_messages(self, source_ws, dest_ws, direction):
+            # Close wallbox connection immediately - let it retry later when EVCC is back
+            await websocket.close(1011, "EVCC backend not available")
+            return
+
+    async def proxy_messages(self, source_ws, dest_ws, direction, station_id=""):
         """Proxy messages between WebSocket connections"""
         try:
             async for message in source_ws:
@@ -586,73 +704,104 @@ class WebSocketProxy:
 
                 # Process messages based on direction
                 if direction == "target->client":
-                    # Messages from evcc to wallbox - convert amperes to watts
+                    # Messages from evcc to wallbox
+                    # Track BootNotification responses from EVCC
                     try:
                         parsed_message = json.loads(message)
 
-                        # Convert ampere limits to watt limits for SetChargingProfile commands
-                        self._convert_amperes_to_watts(parsed_message)
-
-                        # Convert back to JSON if modifications were made
-                        converted_message = json.dumps(parsed_message)
-                        if converted_message != message:
-                            logger.info(f"Converted amperes to watts in message from {direction}")
-                            message = converted_message
-
-                        # Log the message
-                        if converted_message != original_message:
-                            ocpp_logger.info(f"[{direction}-CONVERTED] {message}")
-                            self._add_message_to_buffer(direction, message, "CONVERTED")
-                        else:
-                            ocpp_logger.info(f"[{direction}] {message}")
-                            self._add_message_to_buffer(direction, message, "")
-
+                        # Check for BootNotification response from EVCC
+                        if (isinstance(parsed_message, list) and
+                            len(parsed_message) >= 3 and
+                            parsed_message[0] == 3):  # CallResult
+                            # Check if this is a BootNotification response
+                            payload = parsed_message[2]
+                            if isinstance(payload, dict) and 'status' in payload and payload.get('status') == 'Accepted':
+                                # Likely a BootNotification response
+                                # Check if we have a pending boot for this station
+                                with self.boot_lock:
+                                    if station_id in self.pending_boot_wallboxes:
+                                        self.pending_boot_wallboxes[station_id]['evcc_confirmed'] = True
+                                        logger.info(f"EVCC confirmed BootNotification for {station_id} - stopping periodic sends")
                     except (json.JSONDecodeError, Exception) as e:
-                        logger.debug(f"Could not parse/convert message from {direction}: {e}")
-                        ocpp_logger.info(f"[{direction}] {message}")
+                        logger.debug(f"Could not parse message to check for TriggerMessage: {e}")
+
+                    # Just log and forward without modification
+                    ocpp_logger.info(f"[{direction}] {message}")
+                    self._add_message_to_buffer(direction, message, "", station_id)
 
                 elif direction == "client->target":
-                    # Messages from wallbox to evcc - fix timestamps and standardize SetChargingProfile
-                    fixed_message = self.fix_timestamp(message)
-                    if fixed_message != message:
-                        logger.info(f"Fixed timestamp in message from {direction}")
-                        message = fixed_message
-
-                    # Parse and check if message should be blocked or processed
+                    # Messages from wallbox to evcc
+                    # Track BootNotifications and extract wallbox info from GetConfiguration
+                    # Also intercept TriggerMessage rejections
                     try:
                         parsed_message = json.loads(message)
 
-                        # Check for BootNotification - send config after it's processed
-                        is_boot_notification = (isinstance(parsed_message, list) and
-                                               len(parsed_message) >= 3 and
-                                               parsed_message[2] == "BootNotification")
+                        # Track BootNotification messages (but don't block them)
+                        if (isinstance(parsed_message, list) and
+                            len(parsed_message) >= 4 and
+                            parsed_message[0] == 2 and
+                            parsed_message[2] == "BootNotification"):
+                            # Store boot info for future reference
+                            payload = parsed_message[3] if len(parsed_message) > 3 else {}
+                            with self.boot_lock:
+                                self.pending_boot_wallboxes[station_id] = {
+                                    'boot_info': payload,
+                                    'last_sent': datetime.now(),
+                                    'evcc_confirmed': False
+                                }
+                            logger.info(f"Passing through BootNotification from {station_id} to EVCC")
 
-                        # Check if message should be blocked
-                        if self._should_block_message(parsed_message):
-                            ocpp_logger.info(f"[{direction}-BLOCKED] {message}")
-                            self._add_message_to_buffer(direction, message, "BLOCKED")
-                            continue  # Skip forwarding this message
+                        # Extract wallbox info from GetConfiguration response
+                        elif (isinstance(parsed_message, list) and
+                              len(parsed_message) >= 3 and
+                              parsed_message[0] == 3):  # CallResult
+                            # Check if this is a GetConfiguration response
+                            payload = parsed_message[2]
+                            if isinstance(payload, dict) and 'configurationKey' in payload:
+                                # Extract wallbox info from configuration keys
+                                config_keys = {item['key']: item.get('value', '')
+                                             for item in payload['configurationKey']
+                                             if isinstance(item, dict)}
 
-                        # Standardize SetChargingProfile messages
-                        self._standardize_set_charging_profile(parsed_message)
-                        standardized_message = json.dumps(parsed_message)
-                        if standardized_message != message:
-                            logger.info(f"Standardized SetChargingProfile in message from {direction}")
-                            ocpp_logger.info(f"[{direction}-STANDARDIZED] {standardized_message}")
-                            self._add_message_to_buffer(direction, standardized_message, "STANDARDIZED")
-                            message = standardized_message
-                        else:
-                            ocpp_logger.info(f"[{direction}] {message}")
-                            self._add_message_to_buffer(direction, message, "")
+                                if 'ChargingStationModel' in config_keys:
+                                    boot_info = {
+                                        'chargePointModel': config_keys.get('ChargingStationModel', ''),
+                                        'chargePointVendor': config_keys.get('ChargingStationVendorName', ''),
+                                        'chargePointSerialNumber': config_keys.get('ChargingStationSerialNumber', ''),
+                                        'firmwareVersion': config_keys.get('ChargingStationFirmwareVersion', '')
+                                    }
 
-                        # If BootNotification detected, schedule config commands after forwarding
-                        if is_boot_notification:
-                            logger.info("BootNotification detected - will send config commands after response")
-                            asyncio.create_task(self._send_config_after_boot(source_ws, dest_ws))
+                                    # Store wallbox info for later use when EVCC requests BootNotification
+                                    with self.boot_lock:
+                                        if station_id not in self.pending_boot_wallboxes or not self.pending_boot_wallboxes[station_id].get('evcc_confirmed', False):
+                                            self.pending_boot_wallboxes[station_id] = {
+                                                'boot_info': boot_info,
+                                                'last_sent': datetime.now(),
+                                                'evcc_confirmed': False
+                                            }
+                                            logger.info(f"Extracted BootNotification info from GetConfiguration for {station_id}: {boot_info}")
+                                            logger.info(f"Will send BootNotification when EVCC requests via TriggerMessage")
 
+                            # Intercept TriggerMessage rejections (wallbox flaw workaround)
+                            elif isinstance(payload, dict) and payload.get('status') == 'Rejected':
+                                # Check if we have boot info stored for this wallbox
+                                with self.boot_lock:
+                                    if station_id in self.pending_boot_wallboxes:
+                                        boot_info = self.pending_boot_wallboxes[station_id]['boot_info']
+                                        # Change rejection to acceptance for EVCC
+                                        parsed_message[2] = {'status': 'Accepted'}
+                                        message = json.dumps(parsed_message)
+                                        logger.info(f"Intercepted TriggerMessage rejection from {station_id}, changed to Accepted for EVCC")
+
+                                        # Send the actual BootNotification to EVCC
+                                        logger.info(f"Sending BootNotification to EVCC for {station_id} with info: {boot_info}")
+                                        asyncio.create_task(self._send_boot_notification_now(station_id, boot_info))
                     except (json.JSONDecodeError, Exception) as e:
-                        logger.debug(f"Could not parse/process message from {direction}: {e}")
-                        ocpp_logger.info(f"[{direction}] {message}")
+                        logger.debug(f"Could not parse message to check for BootNotification: {e}")
+
+                    # Just log and forward without modification
+                    ocpp_logger.info(f"[{direction}] {message}")
+                    self._add_message_to_buffer(direction, message, "", station_id)
                 else:
                     ocpp_logger.info(f"[{direction}] {message}")
 
@@ -694,11 +843,22 @@ class WebSocketProxy:
         .message-header .tag.BLOCKED { background: #f48771; }
         .message-header .tag.STANDARDIZED { background: #ce9178; }
         .message-header .tag.QUEUED { background: #569cd6; }
+        .message-header .tag.MONITOR-ONLY { background: #ce9178; }
+        .message-header .tag.AUTO-RESPONSE { background: #569cd6; }
+        .message-header .station { background: #0e639c; color: #fff; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; margin-left: 8px; }
         .message-body { padding: 15px; display: none; }
         .message-body.open { display: block; }
         .message-body pre { background: #1e1e1e; padding: 12px; border-radius: 3px; overflow-x: auto; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.5; }
         .message-type { font-size: 13px; color: #c586c0; margin-left: 10px; }
         .no-messages { text-align: center; padding: 40px; color: #808080; font-size: 16px; }
+        .wallboxes { background: #2d2d30; padding: 10px 20px; border-bottom: 1px solid #3e3e42; display: flex; align-items: center; gap: 15px; }
+        .wallboxes .label { color: #808080; font-size: 14px; }
+        .wallbox-badge { background: #0e639c; color: #fff; padding: 6px 12px; border-radius: 4px; font-size: 13px; font-weight: 500; }
+        .wallbox-badge.monitor { background: #d7ba7d; color: #1e1e1e; }
+        .tabs { background: #2d2d30; padding: 0 20px; border-bottom: 1px solid #3e3e42; display: flex; gap: 5px; }
+        .tab { padding: 12px 20px; cursor: pointer; font-size: 14px; color: #808080; border-bottom: 2px solid transparent; transition: all 0.2s; }
+        .tab:hover { color: #d4d4d4; background: #333333; }
+        .tab.active { color: #569cd6; border-bottom-color: #569cd6; }
     </style>
 </head>
 <body>
@@ -715,6 +875,15 @@ class WebSocketProxy:
             <a href="/" style="background: #569cd6; color: #fff; padding: 8px 16px; text-decoration: none; border-radius: 3px; font-size: 14px;">📝 Messages</a>
         </div>
     </div>
+    <div class="wallboxes">
+        <span class="label">Connected Wallboxes:</span>
+        <div id="wallbox-list">
+            <span style="color: #808080;">Loading...</span>
+        </div>
+    </div>
+    <div class="tabs" id="tabs">
+        <div class="tab active" onclick="switchTab('all', this)">All Messages</div>
+    </div>
     <div class="controls">
         <button onclick="refreshMessages()">🔄 Refresh</button>
         <button onclick="clearMessages()" class="danger">🗑️ Clear</button>
@@ -727,6 +896,8 @@ class WebSocketProxy:
     <script>
         let autoRefresh = true;
         let autoRefreshInterval = null;
+        let currentFilter = 'all';
+        let wallboxes = [];
 
         function formatTimestamp(ts) {
             const date = new Date(ts);
@@ -761,6 +932,66 @@ class WebSocketProxy:
             body.classList.toggle('open');
         }
 
+        function switchTab(filter, element) {
+            currentFilter = filter;
+            // Update tab UI
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            if (element) {
+                element.classList.add('active');
+            }
+            // Refresh messages with filter
+            refreshMessages();
+        }
+
+        async function fetchWallboxes() {
+            console.log('fetchWallboxes called');
+            try {
+                const response = await fetch('/wallboxes');
+                console.log('Response:', response);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch wallboxes: ' + response.status);
+                }
+                const data = await response.json();
+                console.log('Wallboxes data:', data);
+                wallboxes = data.wallboxes || [];
+
+                // Update wallbox list
+                const listEl = document.getElementById('wallbox-list');
+                if (!listEl) {
+                    console.error('wallbox-list element not found');
+                    return;
+                }
+
+                if (wallboxes.length === 0) {
+                    listEl.innerHTML = '<span style="color: #808080;">None</span>';
+                } else {
+                    listEl.innerHTML = wallboxes.map(wb => {
+                        const className = wb.mode === 'monitor-only' ? 'wallbox-badge monitor' : 'wallbox-badge';
+                        return '<span class="' + className + '">' + wb.station_id + ' (' + wb.mode + ')</span>';
+                    }).join(' ');
+                }
+
+                // Update tabs
+                const tabsEl = document.getElementById('tabs');
+                if (!tabsEl) {
+                    console.error('tabs element not found');
+                    return;
+                }
+
+                let tabsHTML = `<div class="tab active" onclick="switchTab('all', this)">All Messages</div>`;
+                wallboxes.forEach(wb => {
+                    tabsHTML += `<div class="tab" onclick="switchTab('${wb.station_id}', this)">${wb.station_id}</div>`;
+                });
+                tabsEl.innerHTML = tabsHTML;
+            } catch (error) {
+                console.error('Error fetching wallboxes:', error);
+                const listEl = document.getElementById('wallbox-list');
+                if (listEl) {
+                    listEl.innerHTML = '<span style="color: #f48771;">Error loading</span>';
+                }
+            }
+        }
+
         async function refreshMessages() {
             try {
                 const response = await fetch('/messages');
@@ -773,11 +1004,17 @@ class WebSocketProxy:
                     return;
                 }
 
+                // Filter messages by selected wallbox
+                const filteredMessages = currentFilter === 'all'
+                    ? data.messages
+                    : data.messages.filter(msg => msg.station_id === currentFilter);
+
                 let html = '';
-                data.messages.forEach((msg, idx) => {
+                filteredMessages.forEach((msg, idx) => {
                     const directionClass = msg.direction === 'client->target' ? 'wallbox-to-evcc' : 'evcc-to-wallbox';
                     const directionText = msg.direction === 'client->target' ? '📤 Wallbox → EVCC' : '📥 EVCC → Wallbox';
                     const tag = msg.tag ? `<span class="tag ${msg.tag}">${msg.tag}</span>` : '';
+                    const station = msg.station_id ? `<span class="station">${msg.station_id}</span>` : '';
                     const msgType = getMessageType(msg.message);
                     const typeSpan = msgType ? `<span class="message-type">${msgType}</span>` : '';
 
@@ -787,6 +1024,7 @@ class WebSocketProxy:
                                 <div>
                                     <span class="direction ${directionClass}">${directionText}</span>
                                     ${typeSpan}
+                                    ${station}
                                 </div>
                                 <div>
                                     ${tag}
@@ -801,7 +1039,12 @@ class WebSocketProxy:
                 });
 
                 container.innerHTML = html;
-                document.getElementById('message-count').textContent = data.messages.length + ' messages';
+                const totalCount = data.messages.length;
+                const filteredCount = filteredMessages.length;
+                const countText = currentFilter === 'all'
+                    ? `${totalCount} messages`
+                    : `${filteredCount} of ${totalCount} messages`;
+                document.getElementById('message-count').textContent = countText;
                 document.getElementById('status').textContent = 'Connected';
             } catch (error) {
                 document.getElementById('status').textContent = 'Connection Error';
@@ -836,10 +1079,14 @@ class WebSocketProxy:
 
         function startAutoRefresh() {
             if (autoRefreshInterval) clearInterval(autoRefreshInterval);
-            autoRefreshInterval = setInterval(refreshMessages, 2000);
+            autoRefreshInterval = setInterval(() => {
+                fetchWallboxes();
+                refreshMessages();
+            }, 2000);
         }
 
         // Initial load and start auto-refresh
+        fetchWallboxes();
         refreshMessages();
         startAutoRefresh();
     </script>
@@ -853,6 +1100,28 @@ class WebSocketProxy:
         with self.buffer_lock:
             messages = list(self.message_buffer)
         return web.json_response({'messages': messages})
+
+    async def handle_wallboxes_api(self, request):
+        """API endpoint to get connected wallboxes"""
+        # Get unique station IDs from recent messages
+        with self.buffer_lock:
+            station_ids = set()
+            for msg in self.message_buffer:
+                if msg.get('station_id'):
+                    station_ids.add(msg['station_id'])
+
+        wallboxes = []
+        for sid in sorted(station_ids):
+            # Check boot confirmation status
+            with self.boot_lock:
+                pending_info = self.pending_boot_wallboxes.get(sid, {})
+                evcc_confirmed = pending_info.get('evcc_confirmed', False)
+            wallboxes.append({
+                'station_id': sid,
+                'mode': 'evcc-confirmed' if evcc_confirmed else 'waiting-for-evcc'
+            })
+
+        return web.json_response({'wallboxes': wallboxes})
 
     async def handle_clear_api(self, request):
         """API endpoint to clear message buffer"""
@@ -1391,6 +1660,7 @@ class WebSocketProxy:
         app = web.Application()
         app.router.add_get('/', self.handle_web_index)
         app.router.add_get('/messages', self.handle_messages_api)
+        app.router.add_get('/wallboxes', self.handle_wallboxes_api)
         app.router.add_post('/clear', self.handle_clear_api)
         app.router.add_get('/status', self.handle_status_page)
         app.router.add_get('/api/status', self.handle_status_api)
@@ -1447,6 +1717,13 @@ def main():
         # Start both WebSocket proxy and web interface
         ws_server = await proxy.start_server()
         web_runner = await proxy.start_web_server()
+
+        # Start background task loop
+        asyncio.create_task(proxy._background_tasks())
+        logger.info("Started background tasks")
+
+        # Don't send startup boot notifications - let wallboxes connect naturally
+        # asyncio.create_task(proxy._send_startup_boot_notifications())
 
         try:
             # Keep running until interrupted

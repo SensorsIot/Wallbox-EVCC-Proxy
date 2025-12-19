@@ -22,6 +22,8 @@ wheels/
 
 # Log files
 *.log
+*.log.*
+ocpp_messages.log*
 
 # Environment variables
 .env
@@ -39,10 +41,33 @@ venv.bak/
 *.swo
 *~
 
-# Claude Code
+# AI Agents and their artifacts
 .claude/
-CLAUDE.md
+.cursor/
+.cursorrules
+.github/copilot-instructions.md
+.aider*
+.continue/
+.windsurf/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Security - Private keys and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+*.ppk
+credentials.json
+secrets.yaml
+config.json
+
+# Backup files (may contain sensitive data)
+*.bak
+*.backup
+*_backup
+*.old
+*.orig
