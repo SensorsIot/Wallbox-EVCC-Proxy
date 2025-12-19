@@ -736,6 +736,17 @@ class WebSocketProxy:
                     try:
                         parsed_message = json.loads(message)
 
+                        # Block FirmwareStatusNotification messages (EVCC doesn't support them)
+                        if (isinstance(parsed_message, list) and
+                            len(parsed_message) >= 4 and
+                            parsed_message[0] == 2 and
+                            parsed_message[2] == "FirmwareStatusNotification"):
+                            # Log as blocked and don't forward to EVCC
+                            ocpp_logger.info(f"[{direction}-BLOCKED] {message}")
+                            self._add_message_to_buffer(direction, message, "BLOCKED", station_id)
+                            logger.info(f"Blocked FirmwareStatusNotification from {station_id} (EVCC doesn't support this feature)")
+                            continue  # Skip forwarding to EVCC
+
                         # Track BootNotification messages (but don't block them)
                         if (isinstance(parsed_message, list) and
                             len(parsed_message) >= 4 and

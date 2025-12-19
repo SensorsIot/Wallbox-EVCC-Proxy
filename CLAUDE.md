@@ -39,6 +39,8 @@ The `WebSocketProxy` class implements a bidirectional WebSocket proxy with OCPP-
 
 7. **Message Blocking** (`_should_block_message`): Blocks ChangeConfiguration commands except for OCPP B.7 configuration keys (LocalPreAuthorize, HeartbeatInterval, etc.)
 
+8. **FirmwareStatusNotification Blocking** (`ocpp_proxy.py:739-748`): Blocks FirmwareStatusNotification messages from wallbox to EVCC since EVCC doesn't support this optional OCPP feature, eliminating unnecessary "NotSupported" error responses
+
 ### Logging Architecture
 
 Two separate logging streams:
@@ -209,6 +211,7 @@ As of the latest firmware, most message transformations are **DISABLED** (`ocpp_
 - TriggerMessage rejection workaround (for wallbox firmware flaw)
 - BootNotification forwarding and tracking
 - B.7 configuration key filtering (still active)
+- **FirmwareStatusNotification blocking** (active - eliminates unsupported feature errors)
 
 Disabled transformations (commented out):
 - Timestamp fixing (`_fix_timestamps_in_dict`)
