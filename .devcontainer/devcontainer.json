@@ -1,0 +1,45 @@
+{
+    "name": "Wallbox-EVCC-Proxy - Python Development",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "workspaceFolder": "/workspaces/Wallbox-EVCC-Proxy",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "charliermarsh.ruff",
+                "ms-python.debugpy"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "python.analysis.typeCheckingMode": "basic",
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff",
+                    "editor.formatOnSave": true
+                }
+            }
+        }
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.11"
+        },
+        "ghcr.io/devcontainers/features/git:1": {},
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "lts"
+        },
+        "ghcr.io/devcontainers/features/sshd:1": {
+            "version": "latest"
+        }
+    },
+    "appPort": ["2226:2222"],
+    "postCreateCommand": "(git clone https://github.com/SensorsIot/DotFiles.git ~/DotFiles && ~/DotFiles/install.sh) || true && pip install -r requirements-dev.txt",
+    "remoteUser": "dev",
+    "mounts": [
+        "source=${localEnv:HOME}/.ssh/authorized_keys,target=/home/dev/.ssh/authorized_keys,type=bind,readonly"
+    ]
+}
