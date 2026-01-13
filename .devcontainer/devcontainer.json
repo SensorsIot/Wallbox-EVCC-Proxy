@@ -37,9 +37,10 @@
         }
     },
     "appPort": ["2226:2222"],
-    "postCreateCommand": "(git clone https://github.com/SensorsIot/DotFiles.git ~/DotFiles && ~/DotFiles/install.sh) || true && pip install -r requirements-dev.txt",
+    "postCreateCommand": "git config --global credential.helper store && (git clone https://github.com/SensorsIot/DotFiles.git ~/DotFiles && ~/DotFiles/install.sh) || true && pip install -r requirements-dev.txt",
     "remoteUser": "dev",
     "mounts": [
-        "source=${localEnv:HOME}/.ssh/authorized_keys,target=/home/dev/.ssh/authorized_keys,type=bind,readonly"
+        "source=${localEnv:HOME}/.ssh/authorized_keys,target=/home/dev/.ssh/authorized_keys,type=bind,readonly",
+        "source=${localEnv:HOME}/.git-credentials,target=/home/dev/.git-credentials,type=bind,readonly"
     ]
 }
