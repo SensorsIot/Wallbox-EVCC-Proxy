@@ -1,3 +1,6 @@
+.claude/*
+!.claude/skills/
+!.claude/commands/
 # Python
 __pycache__/
 *.py[cod]
@@ -42,7 +45,6 @@ venv.bak/
 *~
 
 # AI Agents and their artifacts
-.claude/
 .cursor/
 .cursorrules
 .github/copilot-instructions.md
@@ -70,4 +72,5 @@ config.json
 *.backup
 *_backup
 *.old
-*.orig
+*.orig.claude-data/
+CLAUDE.md
