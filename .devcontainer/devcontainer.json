@@ -36,15 +36,29 @@
             "version": "latest"
         }
     },
+    "runArgs": ["--name", "wallbox-evcc-proxy"],
     "appPort": [
         "2226:2222"
     ],
-    "postCreateCommand": "git config --global credential.helper store && git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' && pip install -r requirements-dev.txt && echo 'cd /workspaces/Wallbox-EVCC-Proxy' >> ~/.bashrc",
+    "postCreateCommand": "git config --global credential.helper store && git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' && npm install -g @anthropic-ai/claude-code && echo 'alias superclaude=\"claude --dangerously-skip-permissions\"' >> ~/.bashrc && pip install -r requirements-dev.txt && echo 'cd /workspaces/Wallbox-EVCC-Proxy' >> ~/.bashrc",
     "remoteUser": "dev",
     "mounts": [
         "source=${localEnv:HOME}/.ssh/authorized_keys,target=/home/dev/.ssh/authorized_keys,type=bind,readonly",
         "source=${localEnv:HOME}/.ssh/id_ed25519,target=/home/dev/.ssh/id_ed25519,type=bind,readonly",
         "source=${localEnv:HOME}/.git-credentials,target=/home/dev/.git-credentials,type=bind,readonly",
-        "source=${localEnv:HOME}/.secrets,target=/home/dev/.secrets,type=bind,readonly"
-    ]
+        "source=${localEnv:HOME}/.secrets,target=/home/dev/.secrets,type=bind,readonly",
+        "source=${localEnv:HOME}/.claude-containers/${localWorkspaceFolderBasename},target=/home/dev/.claude,type=bind"
+    ],
+    "containerEnv": {
+        "INFLUXDB_TOKEN": "${localEnv:INFLUXDB_TOKEN}",
+        "INFLUXDB_URL": "${localEnv:INFLUXDB_URL}",
+        "INFLUXDB_ORG": "${localEnv:INFLUXDB_ORG}",
+        "HA_TOKEN": "${localEnv:HA_TOKEN}",
+        "HA_TOKEN_NODERED": "${localEnv:HA_TOKEN_NODERED}",
+        "HA_URL": "${localEnv:HA_URL}",
+        "GRAFANA_URL": "${localEnv:GRAFANA_URL}",
+        "GRAFANA_USER": "${localEnv:GRAFANA_USER}",
+        "GRAFANA_PASSWORD": "${localEnv:GRAFANA_PASSWORD}",
+        "TELEGRAM_BOT_TOKEN": "${localEnv:TELEGRAM_BOT_TOKEN}"
+    }
 }

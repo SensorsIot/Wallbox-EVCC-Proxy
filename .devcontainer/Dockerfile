@@ -20,3 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/home/dev/.local/bin:${PATH}"
 
 USER dev
+
+# Set default working directory for SSH logins
+WORKDIR /workspaces/Wallbox-EVCC-Proxy
