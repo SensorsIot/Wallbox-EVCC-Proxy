@@ -23,3 +23,4 @@ USER dev
 
 # Set default working directory for SSH logins
 WORKDIR /workspaces/Wallbox-EVCC-Proxy
+RUN echo 'cd /workspaces/Wallbox-EVCC-Proxy 2>/dev/null' >> /home/dev/.bashrc
